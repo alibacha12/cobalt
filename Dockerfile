@@ -1,4 +1,4 @@
-FROM node:24-alpine AS base
+FROM node:22-alpine AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 
@@ -18,7 +18,7 @@ FROM base AS api
 WORKDIR /app
 
 COPY --from=build --chown=node:node /prod/api /app
-COPY --from=build --chown=node:node /app/.git /app/.git
+#COPY --from=build --chown=node:node /app/.git /app/.git
 
 USER node
 

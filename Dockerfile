@@ -6,7 +6,6 @@ FROM base AS build
 WORKDIR /app
 COPY . /app
 
-# Yahan humne 'git' add kiya hai taake error na aaye
 RUN corepack enable
 RUN apk add --no-cache python3 alpine-sdk git
 
@@ -18,8 +17,13 @@ RUN pnpm deploy --filter=@imput/cobalt-api --prod /prod/api
 FROM base AS api
 WORKDIR /app
 
-# Yahan hum git ko initialize kar rahe hain taake code khush ho jaye
-RUN apk add --no-cache git && git init
+# Yahan hum nakli git history bana rahe hain
+RUN apk add --no-cache git && \
+    git init && \
+    git config user.email "you@example.com" && \
+    git config user.name "Your Name" && \
+    git commit --allow-empty -m "init"
+
 COPY --from=build --chown=node:node /prod/api /app
 
 USER node

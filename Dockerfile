@@ -17,14 +17,18 @@ RUN pnpm deploy --filter=@imput/cobalt-api --prod /prod/api
 FROM base AS api
 WORKDIR /app
 
-# Yahan hum nakli git history bana rahe hain
+# Yahan hum Git ki zaruraton ko fake kar rahe hain taake API khush ho jaye
 RUN apk add --no-cache git && \
     git init && \
-    git config user.email "you@example.com" && \
-    git config user.name "Your Name" && \
-    git commit --allow-empty -m "init"
+    git config user.email "deploy@render.com" && \
+    git config user.name "Render Deploy" && \
+    git remote add origin https://github.com/alibacha12/cobalt.git && \
+    git commit --allow-empty -m "fix: initialize git repository for api"
 
 COPY --from=build --chown=node:node /prod/api /app
+
+# Ye command ensure karti hai ke permissions sahi rahein
+RUN chown -R node:node /app
 
 USER node
 

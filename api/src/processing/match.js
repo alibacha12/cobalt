@@ -329,8 +329,8 @@ export default async function({ host, patternMatch, params, authType }) {
             convertGif: params.convertGif,
             requestIP,
             audioBitrate: params.audioBitrate,
-            alwaysProxy: params.alwaysProxy || localProcessing === "forced",
-            localProcessing,
+            alwaysProxy: false,
+            localProcessing: "disabled",
         })
     } catch {
         return createResponse("error", {

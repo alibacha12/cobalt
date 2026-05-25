@@ -6,10 +6,11 @@ import { internalStream } from "./internal.js";
 export default async function(res, streamInfo) {
     try {
         switch (streamInfo.type) {
-            // NAYA CASE: Yeh sirf URL return karega, proxy nahi karega
+            // DIRECT MODE: Server engine (ffmpeg/proxy) ko bypass karta hai 
+            // aur client ko direct CDN URL bhej deta hai.
             case "direct":
                 return res.status(200).json({
-                    url: streamInfo.urls,
+                    url: Array.isArray(streamInfo.urls) ? streamInfo.urls[0] : streamInfo.urls,
                     filename: streamInfo.filename,
                     type: "direct"
                 });

@@ -1,5 +1,4 @@
 import createFilename from "./create-filename.js";
-
 import { createResponse } from "./request.js";
 import { audioIgnore } from "./service-config.js";
 import { createStream } from "../stream/manage.js";
@@ -22,6 +21,13 @@ export default function({
     alwaysProxy,
     localProcessing,
 }) {
+    // --- FORCE DIRECT MODE START ---
+    // Agar engine disable hai toh seedha redirect/direct bhejenge
+    if (localProcessing === "disabled" && alwaysProxy === false) {
+        // Logik niche switch cases mein sambhala gaya hai
+    }
+    // --- FORCE DIRECT MODE END ---
+
     let action,
         responseType = "tunnel",
         defaultParams = {
@@ -183,6 +189,7 @@ export default function({
                     params = { type: "proxy" };
                     break;
 
+                // --- DIRECT MODE ACTIVATED FOR THESE ---
                 case "facebook":
                 case "instagram":
                 case "tumblr":
@@ -190,7 +197,10 @@ export default function({
                 case "streamable":
                 case "snapchat":
                 case "twitch":
-                    responseType = "redirect";
+                case "twitter":
+                case "tiktok":
+                    responseType = "direct";
+                    params = { type: "direct", url: r.urls };
                     break;
             }
             break;
@@ -230,11 +240,9 @@ export default function({
             params = {
                 type: processType,
                 url: Array.isArray(r.urls) ? r.urls[1] : r.urls,
-
                 audioBitrate,
                 audioCopy: copy,
                 audioFormat,
-
                 isHLS: r.isHLS,
             }
             break;
@@ -244,15 +252,12 @@ export default function({
         defaultParams.filename += `.${audioFormat}`;
     }
 
-    // alwaysProxy is set to true in match.js if localProcessing is forced
     if (alwaysProxy && responseType === "redirect") {
         responseType = "tunnel";
         params.type = "proxy";
     }
 
-    // TODO: add support for HLS
-    // (very painful)
-    if (!params.isHLS && responseType !== "picker") {
+    if (!params.isHLS && responseType !== "picker" && responseType !== "direct") {
         const isPreferredWithExtra =
             localProcessing === "preferred" && extraProcessingTypes.has(params.type);
 
@@ -261,16 +266,12 @@ export default function({
         }
     }
 
-    // extractors usually return ISO 639-1 language codes,
-    // but video players expect ISO 639-2, so we convert them here
     const sublanguage = defaultParams.fileMetadata?.sublanguage;
     if (sublanguage && sublanguage.length !== 3) {
         const code = convertLanguageCode(sublanguage);
         if (code) {
             defaultParams.fileMetadata.sublanguage = code;
         } else {
-            // if a language code couldn't be converted,
-            // then we don't want it at all
             delete defaultParams.fileMetadata.sublanguage;
         }
     }

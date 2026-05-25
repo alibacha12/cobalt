@@ -1,344 +1,377 @@
-import { strict as assert } from "node:assert";
+import cors from "cors";
+import http from "node:http";
+import rateLimit from "express-rate-limit";
+import { setGlobalDispatcher, EnvHttpProxyAgent } from "undici";
+import { getCommit, getBranch, getRemote, getVersion } from "@imput/version-info";
+
+import jwt from "../security/jwt.js";
+import stream from "../stream/stream.js";
+import match from "../processing/match.js";
 
 import { env } from "../config.js";
-import { createResponse } from "../processing/request.js";
+import { extract } from "../processing/url.js";
+import { Bright, Cyan } from "../misc/console-text.js";
+import { hashHmac } from "../security/secrets.js";
+import { createStore } from "../store/redis-ratelimit.js";
+import { randomizeCiphers } from "../misc/randomize-ciphers.js";
+import { verifyTurnstileToken } from "../security/turnstile.js";
+import { friendlyServiceName } from "../processing/service-alias.js";
+import { verifyStream } from "../stream/manage.js";
+import { createResponse, normalizeRequest, getIP } from "../processing/request.js";
+import { setupTunnelHandler } from "./itunnel.js";
 
-import { testers } from "./service-patterns.js";
-import matchAction from "./match-action.js";
+import * as APIKeys from "../security/api-keys.js";
+import * as Cookies from "../processing/cookie/manager.js";
+import * as YouTubeSession from "../processing/helpers/youtube-session.js";
 
-import { friendlyServiceName } from "./service-alias.js";
+const git = {
+    branch: await getBranch(),
+    commit: await getCommit(),
+    remote: await getRemote(),
+}
 
-import bilibili from "./services/bilibili.js";
-import reddit from "./services/reddit.js";
-import twitter from "./services/twitter.js";
-import youtube from "./services/youtube.js";
-import vk from "./services/vk.js";
-import ok from "./services/ok.js";
-import tiktok from "./services/tiktok.js";
-import tumblr from "./services/tumblr.js";
-import vimeo from "./services/vimeo.js";
-import soundcloud from "./services/soundcloud.js";
-import instagram from "./services/instagram.js";
-import pinterest from "./services/pinterest.js";
-import streamable from "./services/streamable.js";
-import twitch from "./services/twitch.js";
-import rutube from "./services/rutube.js";
-import dailymotion from "./services/dailymotion.js";
-import snapchat from "./services/snapchat.js";
-import loom from "./services/loom.js";
-import facebook from "./services/facebook.js";
-import bluesky from "./services/bluesky.js";
-import newgrounds from "./services/newgrounds.js";
+const version = await getVersion();
 
-let freebind;
+const acceptRegex = /^application\/json(; charset=utf-8)?$/;
 
-export default async function({ host, patternMatch, params, authType }) {
-    const { url } = params;
-    assert(url instanceof URL);
-    let dispatcher, requestIP;
+const corsConfig = env.corsWildcard ? {} : {
+    origin: env.corsURL,
+    optionsSuccessStatus: 200
+}
 
-    if (env.freebindCIDR) {
-        if (!freebind) {
-            freebind = await import('freebind');
-        }
+const fail = (res, code, context) => {
+    const { status, body } = createResponse("error", { code, context });
+    res.status(status).json(body);
+}
 
-        requestIP = freebind.ip.random(env.freebindCIDR);
-        dispatcher = freebind.dispatcherFromIP(requestIP, { strict: false });
+export const runAPI = async (express, app, __dirname, isPrimary = true) => {
+    const startTime = new Date();
+    const startTimestamp = startTime.getTime();
+
+    const getServerInfo = () => {
+        return JSON.stringify({
+            cobalt: {
+                version: version,
+                url: env.apiURL,
+                startTime: `${startTimestamp}`,
+                turnstileSitekey: env.sessionEnabled ? env.turnstileSitekey : undefined,
+                services: [...env.enabledServices].map(e => {
+                    return friendlyServiceName(e);
+                }),
+            },
+            git,
+        });
     }
 
-    try {
-        let r,
-            isAudioOnly = params.downloadMode === "audio",
-            isAudioMuted = params.downloadMode === "mute";
+    const serverInfo = getServerInfo();
 
-        if (!testers[host]) {
-            return createResponse("error", {
-                code: "error.api.service.unsupported"
-            });
-        }
-        if (!(testers[host](patternMatch))) {
-            return createResponse("error", {
-                code: "error.api.link.unsupported",
-                context: {
-                    service: friendlyServiceName(host),
-                }
-            });
-        }
-
-        // youtubeHLS will be fully removed in the future
-        let youtubeHLS = params.youtubeHLS;
-        const hlsEnv = env.enableDeprecatedYoutubeHls;
-
-        if (hlsEnv === "never" || (hlsEnv === "key" && authType !== "key")) {
-            youtubeHLS = false;
-        }
-
-        const subtitleLang =
-            params.subtitleLang !== "none" ? params.subtitleLang : undefined;
-
-        switch (host) {
-            case "twitter":
-                r = await twitter({
-                    id: patternMatch.id,
-                    index: patternMatch.index - 1,
-                    toGif: !!params.convertGif,
-                    alwaysProxy: params.alwaysProxy,
-                    dispatcher,
-                    subtitleLang
-                });
-                break;
-
-            case "vk":
-                r = await vk({
-                    ownerId: patternMatch.ownerId,
-                    videoId: patternMatch.videoId,
-                    accessKey: patternMatch.accessKey,
-                    quality: params.videoQuality,
-                    subtitleLang,
-                });
-                break;
-
-            case "ok":
-                r = await ok({
-                    id: patternMatch.id,
-                    quality: params.videoQuality
-                });
-                break;
-
-            case "bilibili":
-                r = await bilibili(patternMatch);
-                break;
-
-            case "youtube":
-                let fetchInfo = {
-                    dispatcher,
-                    id: patternMatch.id.slice(0, 11),
-                    quality: params.videoQuality,
-                    codec: params.youtubeVideoCodec,
-                    container: params.youtubeVideoContainer,
-                    isAudioOnly,
-                    isAudioMuted,
-                    dubLang: params.youtubeDubLang,
-                    youtubeHLS,
-                    subtitleLang,
-                }
-
-                if (url.hostname === "music.youtube.com" || isAudioOnly) {
-                    fetchInfo.quality = "1080";
-                    fetchInfo.codec = "vp9";
-                    fetchInfo.isAudioOnly = true;
-                    fetchInfo.isAudioMuted = false;
-
-                    if (env.ytAllowBetterAudio && params.youtubeBetterAudio) {
-                        fetchInfo.quality = "max";
-                    }
-                }
-
-                r = await youtube(fetchInfo);
-                break;
-
-            case "reddit":
-                r = await reddit({
-                    ...patternMatch,
-                    dispatcher,
-                });
-                break;
-
-            case "tiktok":
-                r = await tiktok({
-                    postId: patternMatch.postId,
-                    shortLink: patternMatch.shortLink,
-                    fullAudio: params.tiktokFullAudio,
-                    isAudioOnly,
-                    h265: params.allowH265,
-                    alwaysProxy: params.alwaysProxy,
-                    subtitleLang,
-                });
-                break;
-
-            case "tumblr":
-                r = await tumblr({
-                    id: patternMatch.id,
-                    user: patternMatch.user,
-                    url
-                });
-                break;
-
-            case "vimeo":
-                r = await vimeo({
-                    id: patternMatch.id.slice(0, 11),
-                    password: patternMatch.password,
-                    quality: params.videoQuality,
-                    isAudioOnly,
-                    subtitleLang,
-                });
-                break;
-
-            case "soundcloud":
-                isAudioOnly = true;
-                isAudioMuted = false;
-                r = await soundcloud({
-                    ...patternMatch,
-                    format: params.audioFormat,
-                });
-                break;
-
-            case "instagram":
-                r = await instagram({
-                    ...patternMatch,
-                    quality: params.videoQuality,
-                    alwaysProxy: params.alwaysProxy,
-                    dispatcher
-                })
-                break;
-
-            case "pinterest":
-                r = await pinterest({
-                    id: patternMatch.id,
-                    shortLink: patternMatch.shortLink || false
-                });
-                break;
-
-            case "streamable":
-                r = await streamable({
-                    id: patternMatch.id,
-                    quality: params.videoQuality,
-                    isAudioOnly,
-                });
-                break;
-
-            case "twitch":
-                r = await twitch({
-                    clipId: patternMatch.clip || false,
-                    quality: params.videoQuality,
-                    isAudioOnly,
-                });
-                break;
-
-            case "rutube":
-                r = await rutube({
-                    id: patternMatch.id,
-                    yappyId: patternMatch.yappyId,
-                    key: patternMatch.key,
-                    quality: params.videoQuality,
-                    isAudioOnly,
-                    subtitleLang,
-                });
-                break;
-
-            case "dailymotion":
-                r = await dailymotion(patternMatch);
-                break;
-
-            case "snapchat":
-                r = await snapchat({
-                    ...patternMatch,
-                    alwaysProxy: params.alwaysProxy,
-                });
-                break;
-
-            case "loom":
-                r = await loom({
-                    id: patternMatch.id,
-                    subtitleLang,
-                });
-                break;
-
-            case "facebook":
-                r = await facebook({
-                    ...patternMatch,
-                    dispatcher
-                });
-                break;
-
-            case "bsky":
-                r = await bluesky({
-                    ...patternMatch,
-                    alwaysProxy: params.alwaysProxy,
-                    dispatcher
-                });
-                break;
-
-            case "newgrounds":
-                r = await newgrounds({
-                    ...patternMatch,
-                    quality: params.videoQuality,
-                });
-                break;
-
-            default:
-                return createResponse("error", {
-                    code: "error.api.service.unsupported"
-                });
-        }
-
-        if (r.isAudioOnly) {
-            isAudioOnly = true;
-            isAudioMuted = false;
-        }
-
-        if (r.error && r.critical) {
-            return createResponse("critical", {
-                code: `error.api.${r.error}`,
-            })
-        }
-
-        if (r.error) {
-            let context;
-            switch(r.error) {
-                case "content.too_long":
-                    context = {
-                        limit: parseFloat((env.durationLimit / 60).toFixed(2)),
-                    }
-                    break;
-
-                case "fetch.fail":
-                case "fetch.rate":
-                case "fetch.critical":
-                case "link.unsupported":
-                case "content.video.unavailable":
-                    context = {
-                        service: friendlyServiceName(host),
-                    }
-                    break;
-            }
-
-            return createResponse("error", {
-                code: `error.api.${r.error}`,
-                context,
-            })
-        }
-
-        let localProcessing = params.localProcessing;
-        const lpEnv = env.forceLocalProcessing;
-        const shouldForceLocal = lpEnv === "always" || (lpEnv === "session" && authType === "session");
-        const localDisabled = (!localProcessing || localProcessing === "disabled");
-
-        if (shouldForceLocal && localDisabled) {
-            localProcessing = "preferred";
-        }
-
-       return matchAction({
-            r,
-            host,
-            audioFormat: params.audioFormat,
-            isAudioOnly,
-            isAudioMuted,
-            disableMetadata: params.disableMetadata,
-            filenameStyle: params.filenameStyle,
-            convertGif: params.convertGif,
-            requestIP,
-            audioBitrate: params.audioBitrate,
-            // Yahan humne engine ko force disable kar diya hai
-            alwaysProxy: false,
-            localProcessing: "disabled",
-        })
-    } catch {
-        return createResponse("error", {
-            code: "error.api.fetch.critical",
+    const handleRateExceeded = (_, res) => {
+        const { body } = createResponse("error", {
+            code: "error.api.rate_exceeded",
             context: {
-                service: friendlyServiceName(host),
+                limit: env.rateLimitWindow
             }
-        })
-    }
+        });
+        return res.status(429).json(body);
+    };
+
+    const keyGenerator = (req) => hashHmac(getIP(req), 'rate').toString('base64url');
+
+    const sessionLimiter = rateLimit({
+        windowMs: env.sessionRateLimitWindow * 1000,
+        limit: env.sessionRateLimit,
+        standardHeaders: 'draft-6',
+        legacyHeaders: false,
+        keyGenerator,
+        store: await createStore('session'),
+        handler: handleRateExceeded
+    });
+
+    const apiLimiter = rateLimit({
+        windowMs: env.rateLimitWindow * 1000,
+        limit: (req) => req.rateLimitMax || env.rateLimitMax,
+        standardHeaders: 'draft-6',
+        legacyHeaders: false,
+        keyGenerator: req => req.rateLimitKey || keyGenerator(req),
+        store: await createStore('api'),
+        handler: handleRateExceeded
+    });
+
+    const apiTunnelLimiter = rateLimit({
+        windowMs: env.tunnelRateLimitWindow * 1000,
+        limit: env.tunnelRateLimitMax,
+        standardHeaders: 'draft-6',
+        legacyHeaders: false,
+        keyGenerator: req => keyGenerator(req),
+        store: await createStore('tunnel'),
+        handler: (_, res) => {
+            return res.sendStatus(429);
+        }
+    });
+
+    app.set('trust proxy', ['loopback', 'uniquelocal']);
+
+    app.use('/', cors({
+        methods: ['GET', 'POST'],
+        exposedHeaders: [
+            'Ratelimit-Limit',
+            'Ratelimit-Policy',
+            'Ratelimit-Remaining',
+            'Ratelimit-Reset'
+        ],
+        ...corsConfig,
+    }));
+
+    app.post('/', (req, res, next) => {
+        if (!acceptRegex.test(req.header('Accept'))) {
+            return fail(res, "error.api.header.accept");
+        }
+        if (!acceptRegex.test(req.header('Content-Type'))) {
+            return fail(res, "error.api.header.content_type");
+        }
+        next();
+    });
+
+    app.post('/', (req, res, next) => {
+        if (!env.apiKeyURL) {
+            return next();
+        }
+
+        const { success, error } = APIKeys.validateAuthorization(req);
+        if (!success) {
+            if (
+                (env.sessionEnabled || !env.authRequired)
+                && ['missing', 'not_api_key'].includes(error)
+            ) {
+                return next();
+            }
+
+            return fail(res, `error.api.auth.key.${error}`);
+        }
+
+        req.authType = "key";
+        return next();
+    });
+
+    app.post('/', (req, res, next) => {
+        if (!env.sessionEnabled || req.rateLimitKey) {
+            return next();
+        }
+
+        try {
+            const authorization = req.header("Authorization");
+            if (!authorization) {
+                return fail(res, "error.api.auth.jwt.missing");
+            }
+
+            if (authorization.length >= 256) {
+                return fail(res, "error.api.auth.jwt.invalid");
+            }
+
+            const [ type, token, ...rest ] = authorization.split(" ");
+            if (!token || type.toLowerCase() !== 'bearer' || rest.length) {
+                return fail(res, "error.api.auth.jwt.invalid");
+            }
+
+            if (!jwt.verify(token, getIP(req, 32))) {
+                return fail(res, "error.api.auth.jwt.invalid");
+            }
+
+            req.rateLimitKey = hashHmac(token, 'rate');
+            req.authType = "session";
+        } catch {
+            return fail(res, "error.api.generic");
+        }
+        next();
+    });
+
+    app.post('/', apiLimiter);
+    app.use('/', express.json({ limit: 1024 }));
+
+    app.use('/', (err, _, res, next) => {
+        if (err) {
+            const { status, body } = createResponse("error", {
+                code: "error.api.invalid_body",
+            });
+            return res.status(status).json(body);
+        }
+
+        next();
+    });
+
+    app.post("/session", sessionLimiter, async (req, res) => {
+        if (!env.sessionEnabled) {
+            return fail(res, "error.api.auth.not_configured")
+        }
+
+        const turnstileResponse = req.header("cf-turnstile-response");
+
+        if (!turnstileResponse) {
+            return fail(res, "error.api.auth.turnstile.missing");
+        }
+
+        const turnstileResult = await verifyTurnstileToken(
+            turnstileResponse,
+            req.ip
+        );
+
+        if (!turnstileResult) {
+            return fail(res, "error.api.auth.turnstile.invalid");
+        }
+
+        try {
+            res.json(jwt.generate(getIP(req, 32)));
+        } catch {
+            return fail(res, "error.api.generic");
+        }
+    });
+
+    app.post('/', async (req, res) => {
+        const request = req.body;
+
+        if (!request.url) {
+            return fail(res, "error.api.link.missing");
+        }
+
+        const { success, data: normalizedRequest } = await normalizeRequest(request);
+        if (!success) {
+            return fail(res, "error.api.invalid_body");
+        }
+
+        const parsed = extract(
+            normalizedRequest.url,
+            APIKeys.getAllowedServices(req.rateLimitKey),
+        );
+
+        if (!parsed) {
+            return fail(res, "error.api.link.invalid");
+        }
+
+        if ("error" in parsed) {
+            let context;
+            if (parsed?.context) {
+                context = parsed.context;
+            }
+            return fail(res, `error.api.${parsed.error}`, context);
+        }
+
+        try {
+            const result = await match({
+                host: parsed.host,
+                patternMatch: parsed.patternMatch,
+                params: normalizedRequest,
+                authType: req.authType ?? "none",
+            });
+
+            res.status(result.status).json(result.body);
+        } catch {
+            fail(res, "error.api.generic");
+        }
+    });
+
+    app.use('/tunnel', cors({
+        methods: ['GET'],
+        exposedHeaders: [
+            'Estimated-Content-Length',
+            'Content-Disposition'
+        ],
+        ...corsConfig,
+    }));
+
+    app.get('/tunnel', apiTunnelLimiter, async (req, res) => {
+        const id = String(req.query.id);
+        const exp = String(req.query.exp);
+        const sig = String(req.query.sig);
+        const sec = String(req.query.sec);
+        const iv = String(req.query.iv);
+
+        const checkQueries = id && exp && sig && sec && iv;
+        const checkBaseLength = id.length === 21 && exp.length === 13;
+        const checkSafeLength = sig.length === 43 && sec.length === 43 && iv.length === 22;
+
+        if (!checkQueries || !checkBaseLength || !checkSafeLength) {
+            return res.status(400).end();
+        }
+
+        if (req.query.p) {
+            return res.status(200).end();
+        }
+
+        const streamInfo = await verifyStream(id, sig, exp, sec, iv);
+        if (!streamInfo?.service) {
+            return res.status(streamInfo.status).end();
+        }
+
+        if (streamInfo.type === 'proxy') {
+            streamInfo.range = req.headers['range'];
+        }
+
+        return stream(res, streamInfo);
+    });
+
+    app.get('/', (_, res) => {
+        res.type('json');
+        res.status(200).send(env.envFile ? getServerInfo() : serverInfo);
+    })
+
+    app.get('/favicon.ico', (req, res) => {
+        res.status(404).end();
+    })
+
+    app.get('/*', (req, res) => {
+        res.redirect('/');
+    })
+
+    app.use((_, __, res, ___) => {
+        return fail(res, "error.api.generic");
+    })
+
+    randomizeCiphers();
+    setInterval(randomizeCiphers, 1000 * 60 * 30); 
+
+    env.subscribe(['externalProxy', 'httpProxyValues'], () => {
+        const options = {};
+        if (env.externalProxy) {
+            options.httpProxy = env.externalProxy;
+        }
+
+        setGlobalDispatcher(
+            new EnvHttpProxyAgent(options)
+        );
+    });
+
+    http.createServer(app).listen({
+        port: env.apiPort,
+        host: env.listenAddress,
+        reusePort: env.instanceCount > 1 || undefined
+    }, () => {
+        if (isPrimary) {
+            console.log(`\n` +
+                Bright(Cyan("cobalt ")) + Bright("API ^ω^") + "\n" +
+                "~~~~~~\n" +
+                Bright("version: ") + version + "\n" +
+                Bright("commit: ") + git.commit + "\n" +
+                Bright("branch: ") + git.branch + "\n" +
+                Bright("remote: ") + git.remote + "\n" +
+                Bright("start time: ") + startTime.toUTCString() + "\n" +
+                "~~~~~~\n" +
+                Bright("url: ") + Bright(Cyan(env.apiURL)) + "\n" +
+                Bright("port: ") + env.apiPort + "\n"
+            );
+        }
+
+        if (env.apiKeyURL) {
+            APIKeys.setup(env.apiKeyURL);
+        }
+
+        if (env.cookiePath) {
+            Cookies.setup(env.cookiePath);
+        }
+
+        if (env.ytSessionServer) {
+            YouTubeSession.setup();
+        }
+    });
+
+    setupTunnelHandler();
 }

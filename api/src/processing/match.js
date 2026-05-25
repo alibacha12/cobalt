@@ -318,7 +318,7 @@ export default async function({ host, patternMatch, params, authType }) {
             localProcessing = "preferred";
         }
 
-        return matchAction({
+       return matchAction({
             r,
             host,
             audioFormat: params.audioFormat,
@@ -329,6 +329,7 @@ export default async function({ host, patternMatch, params, authType }) {
             convertGif: params.convertGif,
             requestIP,
             audioBitrate: params.audioBitrate,
+            // Yahan humne engine ko force disable kar diya hai
             alwaysProxy: false,
             localProcessing: "disabled",
         })

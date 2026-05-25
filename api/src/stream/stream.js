@@ -1,12 +1,19 @@
 import proxy from "./proxy.js";
 import ffmpeg from "./ffmpeg.js";
-
 import { closeResponse } from "./shared.js";
 import { internalStream } from "./internal.js";
 
 export default async function(res, streamInfo) {
     try {
         switch (streamInfo.type) {
+            // NAYA CASE: Yeh sirf URL return karega, proxy nahi karega
+            case "direct":
+                return res.status(200).json({
+                    url: streamInfo.urls,
+                    filename: streamInfo.filename,
+                    type: "direct"
+                });
+
             case "proxy":
                 return await proxy(streamInfo, res);
 
